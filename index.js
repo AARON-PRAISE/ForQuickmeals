@@ -54,10 +54,10 @@ Required JSON structure:
 app.post('/suggest-meals', async (req, res) => {
   const { ingredients, mealTime, prepTime } = req.body;
 
- if (!mealTime || !['breakfast', 'brunch', 'lunch', 'dinner', 'snack'].includes(mealTime.toLowerCase())) {
+  if (!mealTime || !['breakfast', 'brunch', 'lunch', 'dinner', 'snack'].includes(mealTime.toLowerCase())) {
     return res.status(400).json({ error: 'mealTime must be breakfast, brunch, lunch, dinner, or snack' });
   }
-  }
+
   if (!prepTime) {
     return res.status(400).json({ error: 'prepTime is required e.g. "1 hour" or "30 minutes"' });
   }
