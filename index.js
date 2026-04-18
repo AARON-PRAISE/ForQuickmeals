@@ -12,12 +12,13 @@ if (!OPENAI_API_KEY) throw new Error('OPENAI_API_KEY missing');
 
 // ---------------- PROMPT ----------------
 function buildMessages(ingredients, mealTime, prepTime) {
+  const hasIngredients = Array.isArray(ingredients) && ingredients.length > 0;
   return [
     {
       role: 'system',
       content: `
-You are a professional Nigerian chef. Based on the ingredients provided, suggest exactly 3 Nigerian meals.
-The meals must be suitable for ${mealTime} and should take no longer than ${prepTime} to prepare.
+You are a professional Nigerian chef. Suggest exactly 3 Nigerian meals suitable for ${mealTime} (which can be breakfast, brunch, lunch, dinner, or snack) and should take no longer than ${prepTime} to prepare.
+${hasIngredients ? `Try to use these available ingredients where possible: ${JSON.stringify(ingredients)}` : 'No specific ingredients were provided, so suggest any 3 popular Nigerian meals suitable for this meal time.'}
 
 For each meal return:
 - name: string
@@ -53,11 +54,9 @@ Required JSON structure:
 app.post('/suggest-meals', async (req, res) => {
   const { ingredients, mealTime, prepTime } = req.body;
 
-  if (!ingredients || !Array.isArray(ingredients) || ingredients.length === 0) {
-    return res.status(400).json({ error: 'ingredients must be a non-empty array' });
+ if (!mealTime || !['breakfast', 'brunch', 'lunch', 'dinner', 'snack'].includes(mealTime.toLowerCase())) {
+    return res.status(400).json({ error: 'mealTime must be breakfast, brunch, lunch, dinner, or snack' });
   }
-  if (!mealTime || !['breakfast', 'lunch', 'dinner'].includes(mealTime.toLowerCase())) {
-    return res.status(400).json({ error: 'mealTime must be breakfast, lunch, or dinner' });
   }
   if (!prepTime) {
     return res.status(400).json({ error: 'prepTime is required e.g. "1 hour" or "30 minutes"' });
