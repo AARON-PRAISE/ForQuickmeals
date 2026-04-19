@@ -1,11 +1,12 @@
 const express = require('express');
 const fetch = require('node-fetch');
+const { webcrypto: crypto } = require('crypto');
 require('dotenv').config();
 
 const app = express();
 app.use(express.json());
 
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 3000;
 
 // ---------------- ENV ----------------
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
@@ -213,7 +214,7 @@ async function generateWaveSpeedImage(prompt) {
 
     const json = JSON.parse(await res.text());
     if (!res.ok || !json.data?.id || !json.data?.urls?.get) {
-      throw new Error('WaveSpeed submit failed');
+      throw new Error(`WaveSpeed submit failed: ${JSON.stringify(json)}`);
     }
     return json.data;
   }
@@ -235,7 +236,6 @@ async function generateWaveSpeedImage(prompt) {
     return null;
   }
 
-  // Try up to 2 attempts
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
       const data = await submitTask();
@@ -251,12 +251,12 @@ async function generateWaveSpeedImage(prompt) {
 
 // ---------------- OPENAI PROMPT ----------------
 function buildMessages(ingredients, mealTime, prepTime) {
-  const hasIngredients = Array.isArray(ingredients) && ingredients.length > 0;
+  const hasIngredients = Array.isArray(ingredients) && ingredients.filter(Boolean).length > 0;
   return [
     {
       role: 'system',
       content: `
-You are a professional Nigerian chef. Suggest exactly 3 Nigerian meals suitable for ${mealTime} (which can be breakfast, brunch, lunch, dinner, or snack) and should take no longer than ${prepTime} to prepare.
+You are a professional Nigerian chef. Suggest exactly 3 Nigerian meals suitable for ${mealTime} and should take no longer than ${prepTime} to prepare.
 ${hasIngredients ? `Try to use these available ingredients where possible: ${JSON.stringify(ingredients)}` : 'No specific ingredients were provided, so suggest any 3 popular Nigerian meals suitable for this meal time.'}
 
 For each meal return:
@@ -289,25 +289,24 @@ Required JSON structure:
 }
 
 // ---------------- BUILD QuickmealDataType MAP ----------------
-// Uses exact field names from QuickmealDataType regardless of actual meal type
 function buildMealMap(suggestion, imageUrl) {
   return {
     LunchName: suggestion.name ?? '',
     LunchDescription: suggestion.description ?? '',
-    LunchIngredients: [],              // not returned by this prompt — empty list
-    MissingIngredientsLunch: [],       // not returned by this prompt — empty list
+    LunchIngredients: [],
+    MissingIngredientsLunch: [],
     LunchImage: imageUrl ?? '',
-    LunchInstructions: [],             // not returned by this prompt — empty list
+    LunchInstructions: [],
     LunchBudget: Number(suggestion.cost) || 0,
-    LunchEquipment: [],                // not returned by this prompt — empty list
-    LunchInstructionImages: [],        // no step images for quick meals
+    LunchEquipment: [],
+    LunchInstructionImages: [],
     lunchcost: Number(suggestion.cost) || 0,
   };
 }
 
 // ---------------- ROUTE ----------------
 app.post('/suggest-meals', async (req, res) => {
-  const { ingredients, mealTime, prepTime, userId } = req.body;
+  const { ingredients, mealTime, prepTime, userID } = req.body;
 
   if (!mealTime || !['breakfast', 'brunch', 'lunch', 'dinner', 'snack'].includes(mealTime.toLowerCase())) {
     return res.status(400).json({ error: 'mealTime must be breakfast, brunch, lunch, dinner, or snack' });
@@ -315,21 +314,20 @@ app.post('/suggest-meals', async (req, res) => {
   if (!prepTime) {
     return res.status(400).json({ error: 'prepTime is required e.g. "1 hour" or "30 minutes"' });
   }
-  if (!userId) {
-    return res.status(400).json({ error: 'userId is required' });
+  if (!userID) {
+    return res.status(400).json({ error: 'userID is required' });
   }
 
-  // Respond immediately so the client is not kept waiting
+  // Respond immediately so client is not kept waiting
   res.json({ success: true, status: 'processing' });
 
-  // Run everything in background
   (async () => {
     try {
       const token = await getAccessToken();
 
-      // 1️⃣ Query all existing QuickMeals for this user and set Ready: false on all
-      console.log('🔍 Querying existing QuickMeals for user:', userId);
-      const existingDocIds = await queryQuickMealsByUser(userId, token);
+      // 1️⃣ Set Ready: false on all existing QuickMeals for this user
+      console.log('🔍 Querying existing QuickMeals for user:', userID);
+      const existingDocIds = await queryQuickMealsByUser(userID, token);
       console.log(`📋 Found ${existingDocIds.length} existing QuickMeals — setting Ready: false`);
       await Promise.all(
         existingDocIds.map((docId) =>
@@ -338,18 +336,18 @@ app.post('/suggest-meals', async (req, res) => {
       );
       console.log('✅ All previous QuickMeals marked as Ready: false');
 
-      // 2️⃣ Create a new QuickMeals doc with Ready: false to start
+      // 2️⃣ Create new QuickMeals doc with Ready: false
       const quickMealId = await firestoreCreate(
         'QuickMeals',
         {
-          UserRef: { __type: 'reference', path: `users/${userId}` },
+          UserRef: { __type: 'reference', path: `users/${userID}` },
           Ready: false,
         },
         token
       );
       console.log('📄 QuickMeals doc created with ID:', quickMealId);
 
-      // 3️⃣ Call OpenAI for 3 meal suggestions
+      // 3️⃣ Call OpenAI for 3 suggestions
       console.log('🤖 Calling OpenAI for meal suggestions...');
       const response = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
@@ -383,7 +381,7 @@ app.post('/suggest-meals', async (req, res) => {
 
       const [meal1, meal2, meal3] = parsed.suggestions;
 
-      // 4️⃣ Call WaveSpeed for each meal's image prompt (sequentially to avoid rate limits)
+      // 4️⃣ Call WaveSpeed for each meal image sequentially
       console.log('🖼️ Generating images via WaveSpeed...');
 
       console.log('  → Generating image for meal 1:', meal1.name);
@@ -399,7 +397,7 @@ app.post('/suggest-meals', async (req, res) => {
       console.log('  ✅ Meal 3 image:', image3 ?? 'failed');
 
       // 5️⃣ Update QuickMeals doc with all 3 meals and set Ready: true
-      console.log('💾 Saving meals to Firestore QuickMeals doc:', quickMealId);
+      console.log('💾 Saving to Firestore QuickMeals doc:', quickMealId);
       await firestoreUpdate(
         `QuickMeals/${quickMealId}`,
         {
