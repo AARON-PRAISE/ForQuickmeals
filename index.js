@@ -252,21 +252,35 @@ async function generateWaveSpeedImage(prompt) {
 // ---------------- OPENAI PROMPT ----------------
 function buildMessages(ingredients, mealTime, prepTime) {
   const hasIngredients = Array.isArray(ingredients) && ingredients.filter(Boolean).length > 0;
+
   return [
     {
       role: 'system',
       content: `
 You are a professional Nigerian chef. Suggest exactly 3 Nigerian meals suitable for ${mealTime} and should take no longer than ${prepTime} to prepare.
-${hasIngredients ? `Try to use these available ingredients where possible: ${JSON.stringify(ingredients)}` : 'No specific ingredients were provided, so suggest any 3 popular Nigerian meals suitable for this meal time.'}
+${hasIngredients
+  ? `The user has these ingredients available: ${JSON.stringify(ingredients)}. Try to use them where possible.`
+  : 'No specific ingredients were provided, suggest any 3 popular Nigerian meals suitable for this meal time.'}
 
 For each meal return:
 - name: string
 - description: string (2–3 sentences about the meal)
 - cost: integer in Naira (estimated total cost to make this meal)
 - time: string (realistic prep + cook time e.g. "45 minutes")
-- image_prompt: string (a detailed photorealistic image prompt of the finished dish, append "low quality" at the end)
+- ingredients: string array of ALL ingredients needed for this meal
+- missing_ingredients: string array of ingredients needed that are NOT in the user's available list above. If user has all ingredients or no ingredients were provided, return [].
+- equipment: string array of kitchen equipment needed
+- instructions: string array of exactly 9 to 12 steps
+- image_prompts object with:
+    - food: detailed photorealistic image of the finished dish, append "low quality" at the end
+    - step_1: image of step 1 of the instructions, append "low quality" at the end
+    - step_5: image of step 5 of the instructions, append "low quality" at the end
+    - step_9: image of step 9 of the instructions, append "low quality" at the end
 
-Return ONLY valid JSON. No markdown, no code fences, no extra text.
+Rules:
+- Nigerian meals only
+- Return ONLY valid JSON. No markdown, no code fences, no extra text.
+
 Required JSON structure:
 {
   "suggestions": [
@@ -275,7 +289,16 @@ Required JSON structure:
       "description": "",
       "cost": 0,
       "time": "",
-      "image_prompt": ""
+      "ingredients": [],
+      "missing_ingredients": [],
+      "equipment": [],
+      "instructions": [],
+      "image_prompts": {
+        "food": "",
+        "step_1": "",
+        "step_5": "",
+        "step_9": ""
+      }
     }
   ]
 }
@@ -288,18 +311,54 @@ Required JSON structure:
   ];
 }
 
+// ---------------- GENERATE ALL IMAGES FOR A MEAL ----------------
+async function generateMealImages(meal, mealNumber) {
+  console.log(`  🍽️ Meal ${mealNumber} (${meal.name}) — generating food image...`);
+  const foodImage = await generateWaveSpeedImage(meal.image_prompts.food);
+  console.log(`  ✅ Meal ${mealNumber} food image:`, foodImage ?? 'failed');
+
+  console.log(`  🍽️ Meal ${mealNumber} — generating step 1 image...`);
+  const step1Image = await generateWaveSpeedImage(meal.image_prompts.step_1);
+  console.log(`  ✅ Meal ${mealNumber} step 1 image:`, step1Image ?? 'failed');
+
+  console.log(`  🍽️ Meal ${mealNumber} — generating step 5 image...`);
+  const step5Image = await generateWaveSpeedImage(meal.image_prompts.step_5);
+  console.log(`  ✅ Meal ${mealNumber} step 5 image:`, step5Image ?? 'failed');
+
+  console.log(`  🍽️ Meal ${mealNumber} — generating step 9 image...`);
+  const step9Image = await generateWaveSpeedImage(meal.image_prompts.step_9);
+  console.log(`  ✅ Meal ${mealNumber} step 9 image:`, step9Image ?? 'failed');
+
+  return {
+    foodImage,
+    instructionImages: [
+      step1Image ?? '',
+      step5Image ?? '',
+      step9Image ?? '',
+    ].filter(Boolean),
+  };
+}
+
 // ---------------- BUILD QuickmealDataType MAP ----------------
-function buildMealMap(suggestion, imageUrl) {
+function buildMealMap(suggestion, foodImage, instructionImages) {
   return {
     LunchName: suggestion.name ?? '',
     LunchDescription: suggestion.description ?? '',
-    LunchIngredients: [],
-    MissingIngredientsLunch: [],
-    LunchImage: imageUrl ?? '',
-    LunchInstructions: [],
+    LunchIngredients: Array.isArray(suggestion.ingredients)
+      ? suggestion.ingredients.map(String)
+      : [],
+    MissingIngredientsLunch: Array.isArray(suggestion.missing_ingredients)
+      ? suggestion.missing_ingredients.map(String)
+      : [],
+    LunchImage: foodImage ?? '',
+    LunchInstructions: Array.isArray(suggestion.instructions)
+      ? suggestion.instructions.map(String)
+      : [],
     LunchBudget: Number(suggestion.cost) || 0,
-    LunchEquipment: [],
-    LunchInstructionImages: [],
+    LunchEquipment: Array.isArray(suggestion.equipment)
+      ? suggestion.equipment.map(String)
+      : [],
+    LunchInstructionImages: instructionImages ?? [],
     lunchcost: Number(suggestion.cost) || 0,
   };
 }
@@ -357,7 +416,7 @@ app.post('/suggest-meals', async (req, res) => {
         },
         body: JSON.stringify({
           model: 'gpt-4o-mini',
-          max_tokens: 1000,
+          max_tokens: 3000,
           messages: buildMessages(ingredients, mealTime, prepTime),
         }),
       });
@@ -381,29 +440,27 @@ app.post('/suggest-meals', async (req, res) => {
 
       const [meal1, meal2, meal3] = parsed.suggestions;
 
-      // 4️⃣ Call WaveSpeed for each meal image sequentially
-      console.log('🖼️ Generating images via WaveSpeed...');
+      // 4️⃣ Generate all images for each meal sequentially
+      // Each meal gets 4 images: food + step1 + step5 + step9 = 12 total WaveSpeed calls
+      console.log('🖼️ Generating images via WaveSpeed (4 images per meal, 12 total)...');
 
-      console.log('  → Generating image for meal 1:', meal1.name);
-      const image1 = await generateWaveSpeedImage(meal1.image_prompt);
-      console.log('  ✅ Meal 1 image:', image1 ?? 'failed');
+      console.log('📸 Meal 1:', meal1.name);
+      const { foodImage: foodImage1, instructionImages: instrImages1 } = await generateMealImages(meal1, 1);
 
-      console.log('  → Generating image for meal 2:', meal2.name);
-      const image2 = await generateWaveSpeedImage(meal2.image_prompt);
-      console.log('  ✅ Meal 2 image:', image2 ?? 'failed');
+      console.log('📸 Meal 2:', meal2.name);
+      const { foodImage: foodImage2, instructionImages: instrImages2 } = await generateMealImages(meal2, 2);
 
-      console.log('  → Generating image for meal 3:', meal3.name);
-      const image3 = await generateWaveSpeedImage(meal3.image_prompt);
-      console.log('  ✅ Meal 3 image:', image3 ?? 'failed');
+      console.log('📸 Meal 3:', meal3.name);
+      const { foodImage: foodImage3, instructionImages: instrImages3 } = await generateMealImages(meal3, 3);
 
       // 5️⃣ Update QuickMeals doc with all 3 meals and set Ready: true
       console.log('💾 Saving to Firestore QuickMeals doc:', quickMealId);
       await firestoreUpdate(
         `QuickMeals/${quickMealId}`,
         {
-          FirstMeal: buildMealMap(meal1, image1),
-          Secondmeal: buildMealMap(meal2, image2),
-          ThirdMeal: buildMealMap(meal3, image3),
+          FirstMeal: buildMealMap(meal1, foodImage1, instrImages1),
+          Secondmeal: buildMealMap(meal2, foodImage2, instrImages2),
+          ThirdMeal: buildMealMap(meal3, foodImage3, instrImages3),
           Ready: true,
         },
         token
