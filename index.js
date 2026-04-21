@@ -384,29 +384,32 @@ app.post('/suggest-meals', async (req, res) => {
     try {
       const token = await getAccessToken();
 
-      // 1️⃣ Set Ready: false on all existing QuickMeals for this user
+      // 1️⃣ Query all existing QuickMeals for this user
       console.log('🔍 Querying existing QuickMeals for user:', userID);
       const existingDocIds = await queryQuickMealsByUser(userID, token);
-      console.log(`📋 Found ${existingDocIds.length} existing QuickMeals — setting Ready: false`);
+
+      // 2️⃣ Set Ready: false AND Recent: false on ALL existing docs for this user
+      console.log(`📋 Found ${existingDocIds.length} existing QuickMeals — setting Ready & Recent to false`);
       await Promise.all(
         existingDocIds.map((docId) =>
-          firestoreUpdate(`QuickMeals/${docId}`, { Ready: false }, token)
+          firestoreUpdate(`QuickMeals/${docId}`, { Ready: false, Recent: false }, token)
         )
       );
-      console.log('✅ All previous QuickMeals marked as Ready: false');
+      console.log('✅ All previous QuickMeals marked as Ready: false, Recent: false');
 
-      // 2️⃣ Create new QuickMeals doc with Ready: false
+      // 3️⃣ Create new QuickMeals doc — Recent: true immediately, Ready: false until images done
       const quickMealId = await firestoreCreate(
         'QuickMeals',
         {
           UserRef: { __type: 'reference', path: `users/${userID}` },
-          Ready: false,
+          Ready: false,   // ✅ flips to true only after all meals + images are saved
+          Recent: true,   // ✅ true immediately — this is the latest doc for this user
         },
         token
       );
-      console.log('📄 QuickMeals doc created with ID:', quickMealId);
+      console.log('📄 QuickMeals doc created — Recent: true, Ready: false — ID:', quickMealId);
 
-      // 3️⃣ Call OpenAI for 3 suggestions
+      // 4️⃣ Call OpenAI for 3 suggestions
       console.log('🤖 Calling OpenAI for meal suggestions...');
       const response = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
@@ -440,9 +443,9 @@ app.post('/suggest-meals', async (req, res) => {
 
       const [meal1, meal2, meal3] = parsed.suggestions;
 
-      // 4️⃣ Generate all images for each meal sequentially
-      // Each meal gets 4 images: food + step1 + step5 + step9 = 12 total WaveSpeed calls
-      console.log('🖼️ Generating images via WaveSpeed (4 images per meal, 12 total)...');
+      // 5️⃣ Generate all images for each meal sequentially
+      // 4 images per meal (food + step1 + step5 + step9) = 12 total WaveSpeed calls
+      console.log('🖼️ Generating images via WaveSpeed (4 per meal, 12 total)...');
 
       console.log('📸 Meal 1:', meal1.name);
       const { foodImage: foodImage1, instructionImages: instrImages1 } = await generateMealImages(meal1, 1);
@@ -453,7 +456,7 @@ app.post('/suggest-meals', async (req, res) => {
       console.log('📸 Meal 3:', meal3.name);
       const { foodImage: foodImage3, instructionImages: instrImages3 } = await generateMealImages(meal3, 3);
 
-      // 5️⃣ Update QuickMeals doc with all 3 meals and set Ready: true
+      // 6️⃣ Update QuickMeals doc with all 3 meals and flip Ready: true
       console.log('💾 Saving to Firestore QuickMeals doc:', quickMealId);
       await firestoreUpdate(
         `QuickMeals/${quickMealId}`,
@@ -461,12 +464,12 @@ app.post('/suggest-meals', async (req, res) => {
           FirstMeal: buildMealMap(meal1, foodImage1, instrImages1),
           Secondmeal: buildMealMap(meal2, foodImage2, instrImages2),
           ThirdMeal: buildMealMap(meal3, foodImage3, instrImages3),
-          Ready: true,
+          Ready: true, // ✅ now everything is ready
         },
         token
       );
 
-      console.log('✅ QuickMeals doc fully saved and marked Ready: true');
+      console.log('✅ QuickMeals doc fully saved — Ready: true, Recent: true');
       console.log('🚀 suggest-meals background job complete');
     } catch (err) {
       console.error('❌ suggest-meals failed:', err.message);
